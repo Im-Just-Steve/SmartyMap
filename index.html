@@ -1,16 +1,245 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0d1117" />
-    <meta name="description" content="SmartyMap — a flight-simulation moving map." />
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml" />
-    <title>SmartyMap</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="description" content="SmartyMap — flight simulation moving map">
+  <title>SmartyMap</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
+
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width:100%; height:100%; margin:0; }
+    body { overflow:hidden; background:#0d1117; color:#e6edf3; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+
+    #app { width:100%; height:100%; position:relative; }
+    #map { position:absolute; inset:0; }
+
+    .topbar {
+      position:absolute; left:0; right:0; top:0; height:64px;
+      display:flex; align-items:center; gap:12px; padding:10px 14px;
+      background:rgba(13,17,23,.96); border-bottom:1px solid #26303a;
+      z-index:10;
+    }
+
+    .brand { display:flex; align-items:center; gap:10px; min-width:0; }
+    .brand-icon { width:38px; height:38px; flex:0 0 38px; }
+    .brand-name { font-size:18px; font-weight:750; }
+    .brand-subtitle { color:#8b949e; font-size:11px; }
+
+    button {
+      border:1px solid #3b4652; background:#171d24; color:#e6edf3;
+      border-radius:8px; padding:9px 13px; cursor:pointer;
+    }
+    button:hover { background:#202832; }
+    #importButton { margin-left:auto; }
+
+    #status {
+      position:absolute; z-index:10; left:14px; bottom:14px;
+      width:min(330px,calc(100vw - 28px)); padding:14px;
+      border:1px solid rgba(90,104,119,.8); border-radius:10px;
+      background:rgba(13,17,23,.93); backdrop-filter:blur(8px);
+      box-shadow:0 8px 30px rgba(0,0,0,.25);
+    }
+    #statusTitle { font-size:13px; font-weight:700; margin-bottom:5px; }
+    #statusText { color:#b5bec8; font-size:12px; line-height:1.4; overflow-wrap:anywhere; }
+    #chooseButton { width:100%; margin-top:11px; }
+    #statusNote { color:#737f8c; font-size:10px; line-height:1.4; margin-top:10px; }
+
+    #aircraft {
+      position:absolute; z-index:5; left:50%; top:50%;
+      width:46px; height:46px; transform:translate(-50%,-50%);
+      pointer-events:none; filter:drop-shadow(0 1px 1px rgba(0,0,0,.65));
+    }
+
+    #fileInput { display:none; }
+
+    .maplibregl-ctrl-top-right { top:74px; right:10px; }
+    .maplibregl-ctrl-group {
+      border-radius:8px !important;
+      background:rgba(13,17,23,.92) !important;
+      border:1px solid #3b4652 !important;
+    }
+    .maplibregl-ctrl-group button { filter:invert(1); }
+
+    @media (max-width:560px) {
+      .topbar { height:58px; }
+      .brand-subtitle { display:none; }
+      .brand-name { font-size:16px; }
+      #importButton { padding:8px 10px; font-size:13px; }
+      #status { left:10px; bottom:10px; width:calc(100vw - 20px); }
+    }
+  </style>
+</head>
+
+<body>
+<div id="app">
+  <div id="map"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 64 64" aria-hidden="true">
+        <path d="M32 5 L37 27 L55 36 L55 41 L37 36 L35 57 L29 57 L27 36 L9 41 L9 36 L27 27 Z"
+              fill="#ffd83d" stroke="#080b0f" stroke-width="3" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <div class="brand-name">SmartyMap</div>
+        <div class="brand-subtitle">Flight simulation moving map</div>
+      </div>
+    </div>
+    <button id="importButton">Import airspace</button>
+  </header>
+
+  <input id="fileInput" type="file"
+         accept=".geojson,.json,application/geo+json,application/json">
+
+  <aside id="status">
+    <div id="statusTitle">Airspace data</div>
+    <div id="statusText">No airspace dataset loaded</div>
+    <button id="chooseButton">Choose GeoJSON</button>
+    <div id="statusNote">
+      SmartyMap does not bundle aviation airspace data. Import a dataset that you are entitled to use.
+    </div>
+  </aside>
+
+  <svg id="aircraft" viewBox="0 0 64 64" aria-label="Aircraft position">
+    <path d="M32 5 L37 27 L55 36 L55 41 L37 36 L35 57 L29 57 L27 36 L9 41 L9 36 L27 27 Z"
+          fill="#ffd83d" stroke="#080b0f" stroke-width="3" stroke-linejoin="round"/>
+  </svg>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
+<script>
+(function () {
+  const statusText = document.getElementById("statusText");
+  const fileInput = document.getElementById("fileInput");
+
+  function setStatus(text) {
+    statusText.textContent = text;
+  }
+
+  const map = new maplibregl.Map({
+    container: "map",
+    style: {
+      version: 8,
+      sources: {
+        osm: {
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          attribution: "© OpenStreetMap contributors"
+        }
+      },
+      layers: [
+        { id: "osm", type: "raster", source: "osm" }
+      ]
+    },
+    center: [-1.5, 54.5],
+    zoom: 5.2
+  });
+
+  map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+  map.on("load", function () {
+    map.addSource("airspace", {
+      type: "geojson",
+      data: { type:"FeatureCollection", features:[] }
+    });
+
+    map.addLayer({
+      id: "airspace-fill",
+      type: "fill",
+      source: "airspace",
+      paint: {
+        "fill-color": "#64748b",
+        "fill-opacity": 0.16
+      }
+    });
+
+    map.addLayer({
+      id: "airspace-outline",
+      type: "line",
+      source: "airspace",
+      paint: {
+        "line-color": "#111827",
+        "line-width": 1.5,
+        "line-opacity": 0.9
+      }
+    });
+
+    setStatus("Map ready — no airspace dataset loaded");
+  });
+
+  function openPicker() {
+    fileInput.click();
+  }
+
+  document.getElementById("importButton").addEventListener("click", openPicker);
+  document.getElementById("chooseButton").addEventListener("click", openPicker);
+
+  fileInput.addEventListener("change", async function () {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = "";
+    if (!file) return;
+
+    try {
+      const parsed = JSON.parse(await file.text());
+
+      if (parsed.type !== "FeatureCollection" || !Array.isArray(parsed.features)) {
+        throw new Error("The file is not a GeoJSON FeatureCollection.");
+      }
+
+      const source = map.getSource("airspace");
+      if (!source) throw new Error("Map has not finished initialising.");
+
+      source.setData(parsed);
+
+      const bounds = new maplibregl.LngLatBounds();
+      let found = false;
+
+      function collect(coords) {
+        if (!Array.isArray(coords)) return;
+
+        if (coords.length >= 2 &&
+            typeof coords[0] === "number" &&
+            typeof coords[1] === "number") {
+          bounds.extend(coords);
+          found = true;
+          return;
+        }
+
+        coords.forEach(collect);
+      }
+
+      parsed.features.forEach(function (feature) {
+        if (feature && feature.geometry) collect(feature.geometry.coordinates);
+      });
+
+      if (found) {
+        map.fitBounds(bounds, {
+          padding: 70,
+          maxZoom: 11,
+          duration: 700
+        });
+      }
+
+      setStatus(
+        parsed.features.length.toLocaleString() +
+        " feature" +
+        (parsed.features.length === 1 ? "" : "s") +
+        " loaded from " + file.name
+      );
+    } catch (error) {
+      setStatus("Could not load file: " + error.message);
+    }
+  });
+
+  map.on("error", function (event) {
+    console.error("MapLibre error:", event && event.error ? event.error : event);
+  });
+})();
+</script>
+</body>
 </html>
